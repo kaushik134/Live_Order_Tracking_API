@@ -1,0 +1,11 @@
+# Dependency directories
+/node_modules
+app.access.log
+app.error.log
+appLogFile.log
+
+# Environment variables file
+.env
+
+# IDE / Editor settings
+.vscode/
