@@ -5,6 +5,7 @@ const { createOrderSchema, getUserOrdersSchema, updateOrderStatusSchema } = requ
 const orderModel = require("../../model/orderModel");
 const productModel = require("../../model/productModel");
 const { orderMsg } = require("../../utils/resMessage");
+const { ORDER_STATUS } = require("../../common/constant");
 
 const CACHE_EXPIRATION = process.env.CACHE_EXPIRATION || 3600;
 
@@ -74,6 +75,11 @@ exports.createOrder = async (req, res) => {
             );
         });
         await Promise.all(updateStockPromises);
+
+        const redis = req.app.get("redis");
+        const cacheKey = `order:${newOrder._id}`;
+        await redis.setEx(cacheKey, CACHE_EXPIRATION, JSON.stringify(newOrder));
+        await redis.del(`userOrders:${userId}`);
 
         return res.createResource({
             message: orderMsg.createSuccess,
@@ -161,19 +167,44 @@ exports.updateOrderStatus = async (req, res) => {
             return res.notFound({ message: orderMsg.notFound });
         }
 
-        await orderModel.findByIdAndUpdate(id, { status: status });
+        const allowedTransitions = {
+            [ORDER_STATUS.CREATED]: [ORDER_STATUS.dispatched, ORDER_STATUS.cancelled],
+            [ORDER_STATUS.dispatched]: [ORDER_STATUS.delivered, ORDER_STATUS.cancelled],
+            [ORDER_STATUS.delivered]: [],
+            [ORDER_STATUS.cancelled]: [],
+        };
+
+        const currentStatus = order.status;
+
+        if (currentStatus === status) {
+            return res.badRequest({
+                message: `Order is already in '${status}' status.`,
+            });
+        }
+
+        const nextStates = allowedTransitions[currentStatus] || [];
+        if (!nextStates.includes(status)) {
+            return res.badRequest({
+                message: `Cannot change order status from '${currentStatus}' to '${status}'.`,
+            });
+        }
+
         order.status = status;
         order.updatedAt = new Date();
+        await order.save();
 
         await redis.del(`userOrders:${order.userId}`);
 
+        const payload = {
+            userId: order.userId.toString(),
+            orderId: order._id.toString(),
+            status: order.status,
+            updatedAt: order.updatedAt,
+        };
+
         const io = req.app.get("io");
         if (io) {
-            io.to(order.userId.toString()).emit("orderUpdated", {
-                orderId: order._id,
-                newStatus: order.status,
-                updatedAt: order.updatedAt,
-            });
+            io.to(payload.userId).emit("orderUpdated", payload);
         }
 
         return res.success({
